@@ -1,171 +1,170 @@
 # sing-box 一键部署脚本（Hysteria2 + VLESS REALITY）
 
-这是一套在 Debian 上安装并配置官方 [sing-box](https://sing-box.sagernet.org) 的**一键部署脚本**，不是从零实现的代理协议。同一台服务器会同时提供：
+这是一套在 Debian 上安装并配置官方 [sing-box](https://sing-box.sagernet.org) 的一键部署脚本，不是从零实现的代理协议。同一台服务器会同时提供：
 
-- **Hysteria2**：监听 **UDP 443**（端口可改）
-- **VLESS + REALITY**：监听 **TCP 443**
+- **Hysteria2**：UDP，默认端口 443
+- **VLESS + REALITY**：TCP，端口 443（写在脚本里，没有单独的端口变量）
 
-实际旧服验证环境是 **Debian GNU/Linux 11**（bullseye），AWS Lightsail，区域 `ap-northeast-1`。本教程计划选择 **Debian 12**，但 Debian 12 **尚未验证**。
+实际旧服验证环境是 **Debian GNU/Linux 11**（bullseye），AWS Lightsail，区域 `ap-northeast-1`，官方 sing-box **1.13.14**。本教程计划选择 **Debian 12**，但 Debian 12 **尚未验证**。下面的命令说明对应脚本当前行为，不是一次新的安装实测。
 
-脚本会生成自签 TLS 证书（仅用于 Hysteria2）、服务端配置、systemd 服务，以及客户端 JSON 和分享链接。密钥在首次运行时自动生成，并保存在服务器本地的 `state/server.env`，请不要把真实配置提交到 Git。
+密钥在首次运行时生成，写在服务器本地的 `/cloud/service/vpnProxy/state/server.env`。不要把真实配置或分享链接提交到 Git。
 
-## 适用环境
+## 前置条件
 
-已在下列旧服环境中实际跑通（只记录核对到的事实）：
+1. 一台 **AWS Lightsail** 上的 **Debian** 实例，并且有公网 IPv4。旧服验证的是 Debian 11；计划使用 Debian 12，但尚未验证。
+2. 用 Lightsail 控制台提供的方式 **SSH 登录** 这台实例。下面的命令都在这台服务器上执行。
+3. 在 Lightsail 实例的 **Networking** 防火墙里放行（这一层脚本不会改，和系统里的 iptables / ufw 是分开的）：
+   - **TCP 22**（SSH）
+   - **TCP 443**（VLESS + REALITY）
+   - **UDP 443**（Hysteria2；只有改了下面的 `HYSTERIA2_PORT` 时，才改为放行那个 UDP 端口）
+4. 准备一个伪装域名，用作 REALITY 的 SNI，以及 Hysteria2 自签证书的 CN。它应是公网可访问、且在 443 端口提供 TLS 的网站主机名。不要把字面值 `YOUR_SNI` 留给脚本。
 
-- 系统：Debian GNU/Linux 11（bullseye），x86_64
-- 云厂商：AWS（区域 `ap-northeast-1`，东京）；用户侧通过 Lightsail 控制台管理
-- 代理程序：官方 `sing-box` 包，版本 **1.13.14**（APT 来源 `https://deb.sagernet.org/`）
-- 实例规格：`t3.nano`（内存较小，但当前服务可正常运行）
+脚本只读取这几个环境变量，没有命令行参数：
 
-脚本使用 `apt-get`，面向 Debian。上面是旧服已验证环境（Debian 11）。新教程计划选择 **Debian 12**，但 Debian 12 尚未验证；其他发行版、其他区域也未验证。需要 `sudo` / root。
+| 变量 | 默认值 | 脚本实际用它做什么 |
+| --- | --- | --- |
+| `SNI` | `YOUR_SNI` | 证书 CN / SAN、REALITY 的 `server_name` 和 `handshake.server`、两条分享链接里的 `sni` |
+| `HYSTERIA2_PORT` | `443` | Hysteria2 的 UDP 监听端口、对应分享链接端口，以及本机防火墙放行的 UDP 端口 |
+| `REALITY_SERVER_PORT` | `443` | 只写入 REALITY `handshake.server_port`。VLESS 监听端口仍是 443 |
+| `REALITY_DEST` | `YOUR_SNI:443` | 只写入 `state/server.env`。当前 `write_config` 不用它，握手目标用的是 `SNI` |
 
-## 安装前准备
+## 一键安装
 
-1. 准备一台可 SSH 登录的 Debian 服务器，并已绑定公网 IPv4。
-2. 在云厂商防火墙中放行（Lightsail 在实例的 **Networking** 页操作，这与系统里的 iptables 是两层，两层都要放行才进得来）：
-   - TCP 22（SSH）
-   - TCP 443（VLESS + REALITY）
-   - UDP 443（Hysteria2；若你改了 `HYSTERIA2_PORT`，则放行对应 UDP 端口）
-3. 选定一个用作 REALITY 伪装和 Hysteria2 证书 CN / SNI 的域名。它应是一个公网可访问、且在 443 端口提供 TLS 的常用网站主机名，**不要**把字面值 `YOUR_SNI` 留给脚本去签发证书。
+先导出伪装域名（把 `www.example.com` 换成你自己的），再执行脚本。`sudo -E` 会把这些变量带进 root 环境；脚本在非 root 下自行提权时用的也是 `sudo -E`。不带 `-E` 的 `sudo` 会丢掉 `SNI`，脚本就会使用默认值 `YOUR_SNI`。
 
-安装前在当前 shell 导出（示例）：
+用 git 克隆整个仓库：
 
 ```bash
+git clone https://github.com/hzopc1031/lightsail-sing-box-proxy.git
+cd lightsail-sing-box-proxy
 export SNI="www.example.com"
-export REALITY_DEST="${SNI}:443"
-```
-
-把 `www.example.com` 换成你选定的伪装站点。也可同时覆盖端口：
-
-```bash
-export REALITY_SERVER_PORT=443
-export HYSTERIA2_PORT=443
-```
-
-## 安装步骤
-
-脚本会把项目文件写到固定目录 **`/cloud/service/vpnProxy`**（服务端配置、证书、客户端文件、日志都在这里）。如需改路径，先编辑 `deploy_vpn.sh` 顶部的 `PROJECT_DIR`。
-
-将本仓库中的 `deploy_vpn.sh` 上传到服务器后执行：
-
-```bash
-chmod +x deploy_vpn.sh
 sudo -E bash ./deploy_vpn.sh
 ```
 
-`sudo -E` 用来保留你在上一步导出的 `SNI` 等环境变量。脚本会自行提权；它执行的顺序与源码中的 `main` 一致：
-
-1. `inspect_server`：记录系统、路由、端口和现有 sing-box 状态
-2. `install_packages`：安装 `ca-certificates curl gnupg lsb-release openssl iproute2 iptables nftables`
-3. `install_sing_box`：添加官方 APT 源（GPG：`https://sing-box.app/gpg.key`，软件源：`https://deb.sagernet.org/`）并安装 `sing-box`
-4. `load_or_create_state`：若已有 `state/server.env` 则复用密钥，否则生成 UUID、SHORT_ID、Hysteria2 密码和 REALITY 密钥对
-5. `ensure_cert`：若证书不存在，则用 OpenSSL 生成 RSA 4096、有效期 3650 天的自签证书（CN / SAN 使用 `SNI`，SAN 中还会写入公网 IP）
-6. `write_config`：写入 `/cloud/service/vpnProxy/server/sing-box-config.json`
-7. `validate_config_or_retry_without_flow`：`sing-box check`；若因版本不支持 `xtls-rprx-vision` 失败，会去掉 `flow` 再检查一次
-8. `configure_systemd`：若系统已有官方 `sing-box.service`，则写入 drop-in `override.conf`，改为 `sing-box run -c /cloud/service/vpnProxy/server/sing-box-config.json`；否则创建同内容的服务单元。然后 `daemon-reload` 并 `enable`
-9. `configure_firewall`：若 ufw 已启用，放行 22/tcp、443/tcp 和 Hysteria2 的 UDP 端口；若 nftables 服务处于 active，脚本 **不会改规则**，只提示你自行放行；否则尝试添加运行时 iptables 规则（不一定持久生效）
-10. `write_clients`：在 `/cloud/service/vpnProxy/clients/` 生成客户端 JSON、分享链接和说明
-11. `restart_service`：`systemctl restart sing-box`
-12. `post_validation` / `print_finish`：检查版本、配置、端口，并提示 Lightsail 控制台还要放行的端口
-
-完成后确认：
+或者只下载 `deploy_vpn.sh`：
 
 ```bash
-sudo systemctl status sing-box --no-pager
-sudo sing-box check -c /cloud/service/vpnProxy/server/sing-box-config.json
-sudo ss -lntup | grep -E '(:443|:22)'
+curl -fsSL -o deploy_vpn.sh https://raw.githubusercontent.com/hzopc1031/lightsail-sing-box-proxy/main/deploy_vpn.sh
+export SNI="www.example.com"
+sudo -E bash ./deploy_vpn.sh
 ```
 
-正常时应看到 `sing-box` 在 **0.0.0.0:443** 上同时监听 TCP 和 UDP，服务为 `active (running)` 且已开机启用。
+需要同时改 Hysteria2 端口时，在同一条 shell 里额外导出后再执行，例如 `export HYSTERIA2_PORT=443`。不导出则用默认 443。
 
-## 配置说明
+## 脚本做了什么
 
-示例文件：
+固定目录是 `/cloud/service/vpnProxy`。要改这个路径，只能编辑 `deploy_vpn.sh` 顶部的 `PROJECT_DIR`，脚本没有别的路径参数。执行顺序与源码里的 `main` 相同：
 
-- `config.example.json`：与脚本生成的服务端 JSON 结构相同（sing-box 使用 JSON，不是 YAML）
-- `examples/server.env.example`：本地密钥文件的字段列表
-- `examples/sing-box-hysteria2-client.json`、`examples/sing-box-vless-reality-client.json`：客户端示例
-- `examples/hysteria2-share-link.example.txt`、`examples/vless-reality-share-link.example.txt`：分享链接格式
+1. 记录系统、路由、端口和现有 sing-box 状态。
+2. `apt-get install`：`ca-certificates`、`curl`、`gnupg`、`lsb-release`、`openssl`、`iproute2`、`iptables`、`nftables`。
+3. 添加官方 APT 源（GPG `https://sing-box.app/gpg.key`，软件源 `https://deb.sagernet.org/`）并安装 `sing-box`。
+4. 若已有 `state/server.env` 则读入已有密钥、SNI 和端口；否则生成 UUID、SHORT_ID、Hysteria2 密码和 REALITY 密钥对。
+5. 证书文件不存在时，用 OpenSSL 生成 RSA 4096、有效期 3650 天的自签证书（仅给 Hysteria2；没有 ACME / Let's Encrypt）。
+6. 写入服务端配置 `/cloud/service/vpnProxy/server/sing-box-config.json`。
+7. `sing-box check`。若因版本不支持 `xtls-rprx-vision` 而失败，会去掉 `flow` 再检查一次。
+8. 配置 systemd：已有官方 `sing-box.service` 时写入 drop-in，把启动命令改成这份配置；否则新建单元。然后 `daemon-reload` 并 `enable`。
+9. 本机防火墙：ufw 已启用时放行 22/tcp、443/tcp 和 Hysteria2 的 UDP 端口；nftables 处于 active 时不改规则，只提示你自己放行；否则尝试添加运行时 iptables 规则（不一定重启后还在）。
+10. 在 `/cloud/service/vpnProxy/clients/` 生成客户端 JSON、分享链接和说明。
+11. `systemctl restart sing-box`，并检查版本、配置和监听端口。
 
-需要你自行填写的值：
+服务实际读取的是 `/cloud/service/vpnProxy/server/sing-box-config.json`，不是 `/etc/sing-box/config.json`。安装日志在 `/cloud/service/vpnProxy/logs/deploy-<UTC时间>.log`。
 
-| 占位符 | 含义 |
+## 生成文件的位置
+
+| 路径 | 内容 |
 | --- | --- |
-| `YOUR_SNI` | REALITY / 证书使用的伪装域名 |
-| `YOUR_SERVER_IP` | 服务器公网 IPv4 |
-| `YOUR_PASSWORD` | Hysteria2 用户密码 |
-| `YOUR_UUID` | VLESS 用户 UUID |
-| `YOUR_REALITY_PRIVATE_KEY` / `YOUR_REALITY_PUBLIC_KEY` | `sing-box generate reality-keypair` 生成的密钥对 |
-| `YOUR_SHORT_ID` | REALITY short ID（脚本用 `openssl rand -hex 8` 生成） |
+| `/cloud/service/vpnProxy/server/sing-box-config.json` | 服务端配置，模式 600 |
+| `/cloud/service/vpnProxy/server/tls/hysteria2.crt` | Hysteria2 自签证书 |
+| `/cloud/service/vpnProxy/server/tls/hysteria2.key` | 证书私钥，模式 600 |
+| `/cloud/service/vpnProxy/state/server.env` | UUID、REALITY 密钥、Hysteria2 密码、SNI、端口、公网 IP，模式 600 |
+| `/cloud/service/vpnProxy/clients/sing-box-vless-reality-client.json` | VLESS REALITY 的 sing-box 客户端配置 |
+| `/cloud/service/vpnProxy/clients/sing-box-hysteria2-client.json` | Hysteria2 的 sing-box 客户端配置 |
+| `/cloud/service/vpnProxy/clients/vless-reality-share-link.txt` | VLESS 分享链接 |
+| `/cloud/service/vpnProxy/clients/hysteria2-share-link.txt` | Hysteria2 分享链接 |
+| `/cloud/service/vpnProxy/clients/README.md` | 脚本写给这台服务器的连接说明 |
+| `/cloud/service/vpnProxy/backups/` | 再次运行时备份的旧配置和旧客户端目录 |
 
-说明：
+`clients/` 目录模式是 700，其中文件模式是 600。脚本会尝试把该目录交给系统用户 `admin`（Lightsail Debian 镜像上常见的登录用户）。没有这个用户时，所有权不变。
 
-- 服务端 `listen` 为 `0.0.0.0`，两个 inbound 默认都是 443，协议不同（TCP / UDP），可以共存。
-- Hysteria2 使用**自签证书**，没有 ACME / Let’s Encrypt。客户端必须开启 `insecure: true`（或等价的 `allowInsecure` / 分享链接里的 `insecure=1`）。
-- 脚本会把 `REALITY_DEST` 写入 `server.env`，但当前 `write_config` 里 REALITY 的 `handshake.server` 和 `tls.server_name` 实际都使用 **`SNI`**。若两者不一致，以 `SNI` 为准。
-- 客户端 VLESS 默认在本机 `127.0.0.1:2080` 提供 mixed（HTTP/SOCKS）入站；Hysteria2 在 `127.0.0.1:2081`。
-- 默认 `/etc/sing-box/config.json` **不会**被这个服务使用；真正生效的是 `/cloud/service/vpnProxy/server/sing-box-config.json`。
+## 查看客户端配置和分享链接
 
-## 开放 UDP 端口（Lightsail 防火墙）
-
-Lightsail 控制台的防火墙独立于操作系统防火墙。即使脚本已经添加了 iptables 规则，也要在实例 **Networking** 中手动添加：
-
-1. 保留 SSH：TCP 22
-2. 自定义规则：TCP 443（来源建议限制为你的 IP；若需要任意来源则用 `0.0.0.0/0`）
-3. 自定义规则：UDP 443（或你设置的 `HYSTERIA2_PORT`）
-
-只开放 TCP 443 时，VLESS 可能可用，Hysteria2 不可用。
-
-## 客户端连接示例
-
-把示例里的占位符换成 `clients/` 目录下生成的真实值。不要把真实分享链接或带密码的 JSON 发到公开仓库。
-
-### Hysteria2（sing-box）
+SSH 登录服务器后：
 
 ```bash
-sing-box check -c sing-box-hysteria2-client.json
-sing-box run -c sing-box-hysteria2-client.json
-curl -x socks5h://127.0.0.1:2081 https://ifconfig.me
+sudo ls -la /cloud/service/vpnProxy/clients
+sudo cat /cloud/service/vpnProxy/clients/vless-reality-share-link.txt
+sudo cat /cloud/service/vpnProxy/clients/hysteria2-share-link.txt
+sudo cat /cloud/service/vpnProxy/clients/sing-box-vless-reality-client.json
+sudo cat /cloud/service/vpnProxy/clients/sing-box-hysteria2-client.json
 ```
 
-分享链接格式：
+若当前 SSH 用户就是 `admin`，并且脚本成功改过所有权，可以不加 `sudo`。把链接复制到自己的客户端即可。脚本不会把这些文件传到你的电脑，也不要把它们贴回公开仓库。
 
-```text
-hysteria2://YOUR_PASSWORD@YOUR_SERVER_IP:443?insecure=1&sni=YOUR_SNI#sing-box-hysteria2
-```
+仓库里的 `config.example.json` 和 `examples/` 只是占位符样例，不是这台服务器生成的可用配置。
 
-Shadowrocket 等客户端导入该链接时，必须允许不安全证书（自签）。
+## 客户端用法
 
-### VLESS + REALITY（sing-box）
+脚本只生成上面的 sing-box JSON 和两条分享链接。本仓库不附带 v2rayN、Shadowrocket、Clash Meta 或其他客户端。
+
+Hysteria2 用的是自签证书。分享链接里已经带有 `insecure=1`，sing-box 客户端 JSON 里是 `"insecure": true`。导入后必须允许不安全证书（有的客户端叫 allow insecure）。不开启时 Hysteria2 连不上。
+
+### sing-box
+
+把对应 JSON 拷到本机后执行。VLESS 那份在本机 `127.0.0.1:2080` 提供 mixed（HTTP/SOCKS）入站，Hysteria2 那份在 `127.0.0.1:2081`。这是 JSON 里的端口，不是服务器端口。
 
 ```bash
 sing-box check -c sing-box-vless-reality-client.json
 sing-box run -c sing-box-vless-reality-client.json
 curl -x socks5h://127.0.0.1:2080 https://ifconfig.me
+
+sing-box check -c sing-box-hysteria2-client.json
+sing-box run -c sing-box-hysteria2-client.json
+curl -x socks5h://127.0.0.1:2081 https://ifconfig.me
 ```
 
-分享链接格式（由脚本写出，字段与上面的 JSON 对应）：
+### v2rayN、Shadowrocket、Clash Meta 等
 
-```text
-vless://YOUR_UUID@YOUR_SERVER_IP:443?encryption=none&flow=xtls-rprx-vision&security=reality&sni=YOUR_SNI&fp=chrome&pbk=YOUR_REALITY_PUBLIC_KEY&sid=YOUR_SHORT_ID&type=tcp#sing-box-vless-reality
+客户端自己支持 VLESS REALITY 或 Hysteria2 时，导入对应的分享链接：
+
+- VLESS：`vless-reality-share-link.txt`（TCP，REALITY，指纹 chrome，flow 为 `xtls-rprx-vision`）
+- Hysteria2：`hysteria2-share-link.txt`，并允许不安全证书
+
+Clash Meta（Mihomo）没有由本脚本生成的配置文件。需要在支持这两种协议的核心里，按链接中的地址、端口、UUID 或密码、SNI、public key、short ID 自行填写；Hysteria2 同样要允许不安全证书。
+
+## 常用运维命令
+
+```bash
+sudo systemctl status sing-box --no-pager
+sudo systemctl restart sing-box
+sudo journalctl -u sing-box -n 100 --no-pager
+sudo sing-box check -c /cloud/service/vpnProxy/server/sing-box-config.json
+sudo ss -lntup | grep ':443'
 ```
 
-其他客户端（Shadowrocket、Mihomo/Clash Meta 等）需自身支持 REALITY 和 Hysteria2，再按同样字段填写。本仓库不附带这些第三方客户端。
+正常时 `sing-box` 为 `active (running)`，并在 `0.0.0.0:443` 上同时监听 TCP 和 UDP（Hysteria2 端口若改过，UDP 行是那个端口）。
 
-## 常见问题
+## 更新或重装
 
-**Q: 这是官方 hysteria 二进制吗？**  
-不是。运行的是官方 `sing-box`，用它的 `hysteria2` inbound。没有 `hysteria-server` 服务。
+没有单独的更新命令或版本参数。在服务器上再次执行原来的安装命令即可：
 
-**Q: 为什么连不上 Hysteria2？**  
-检查 Lightsail / 安全组是否放行了 **UDP** 443；客户端是否设置了 `insecure: true`；密码和 SNI 是否与服务端一致。可用 `sudo journalctl -u sing-box -n 100 --no-pager` 查看是否有 inbound 日志。
+```bash
+sudo -E bash ./deploy_vpn.sh
+```
 
-**Q: 只想开 Hysteria2，不要 VLESS？**  
-当前脚本总会同时写入两个 inbound。若要只保留其中一个，需要你自行改 `deploy_vpn.sh` 里的 `write_config` 或生成后的 JSON，并重新 `sing-box check` / 重启服务。本仓库没有单独的“只安装 Hysteria2”开关。
+再次执行时脚本会：
 
-**Q: 如何卸载？**  
-脚本生成的说明中包含：
+- 再次 `apt-get install -y sing-box`（官方源里若有更新的包，会被装上）
+- 读入已有的 `/cloud/service/vpnProxy/state/server.env`。文件里的 UUID、密钥、密码、SNI 和端口会覆盖你这次新 export 的同名变量
+- 已有服务端 JSON 复制到 `/cloud/service/vpnProxy/backups/`
+- 已有 `clients/` 目录先备份，再按当前密钥重写
+- 证书文件还在时不重新签发
+- `systemctl restart sing-box`
+
+要换成新的 SNI、端口或密钥，脚本没有对应参数。需要先改或移走 `state/server.env` 里的对应行；换 SNI 后若还要新证书，再移走 `server/tls/hysteria2.crt` 和 `hysteria2.key`，然后重新执行。移走整个 `server.env` 会生成一套新密钥，旧客户端链接失效。
+
+## 卸载
+
+脚本写给服务器的说明使用下面这组命令。它们停用并删除本脚本创建的单元和 drop-in，再卸载 `sing-box` 包：
 
 ```bash
 sudo systemctl disable --now sing-box
@@ -175,13 +174,25 @@ sudo systemctl daemon-reload
 sudo apt-get remove -y sing-box
 ```
 
-以上命令 **不会** 删除 `/cloud/service/vpnProxy` 下的配置、证书和密钥，需你手动确认后再删。
+这组命令不会删除 `/cloud/service/vpnProxy` 里的配置、证书、密钥和客户端文件。确认不再需要后，再自行删除该目录。
 
-**Q: 重复运行脚本会怎样？**  
-若 `state/server.env` 已存在，会复用已有密钥；已有服务端配置会被复制到 `backups/`；客户端目录会被备份后重写。仍会 `systemctl restart sing-box`。
+## 常见问题
 
-**Q: 新用户一定有免费额度吗？**  
-不一定。是否免费、能用多久，以 AWS 当时的账户资格和账单页为准，本项目不保证免费额度。
+**Q: 连不上，先查什么？**  
+先看 Lightsail **Networking** 里有没有放行 **UDP 443**。只放行 TCP 443 时，VLESS 可能可用，Hysteria2 不可用。然后再看客户端是否允许了不安全证书、密码和 SNI 是否与 `/cloud/service/vpnProxy/clients/` 里的文件一致。服务端日志：
+
+```bash
+sudo journalctl -u sing-box -n 100 --no-pager
+```
+
+**Q: 这是官方 hysteria 二进制吗？**  
+不是。运行的是官方 `sing-box` 的 `hysteria2` inbound，没有 `hysteria-server` 服务。
+
+**Q: 可以只安装 Hysteria2、不要 VLESS 吗？**  
+不可以靠某个参数关掉。当前脚本每次都会写两个 inbound。要只留一个，需要自己改 `deploy_vpn.sh` 的 `write_config` 或生成后的 JSON，再 `sing-box check` 并重启服务。
+
+**Q: 仓库里的 example 能直接连吗？**  
+不能。那些文件里的 `YOUR_SERVER_IP`、`YOUR_PASSWORD`、`YOUR_UUID` 等都是占位符。可用的是服务器上 `clients/` 目录里生成的文件。
 
 ## License
 
