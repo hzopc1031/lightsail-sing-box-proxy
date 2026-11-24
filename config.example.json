@@ -1,0 +1,66 @@
+{
+  "log": {
+    "level": "info",
+    "timestamp": true
+  },
+  "inbounds": [
+    {
+      "type": "vless",
+      "tag": "vless-reality-in",
+      "listen": "0.0.0.0",
+      "listen_port": 443,
+      "users": [
+        {
+          "name": "primary",
+          "uuid": "YOUR_UUID",
+          "flow": "xtls-rprx-vision"
+        }
+      ],
+      "tls": {
+        "enabled": true,
+        "server_name": "YOUR_SNI",
+        "reality": {
+          "enabled": true,
+          "handshake": {
+            "server": "YOUR_SNI",
+            "server_port": 443
+          },
+          "private_key": "YOUR_REALITY_PRIVATE_KEY",
+          "short_id": [
+            "YOUR_SHORT_ID"
+          ]
+        }
+      }
+    },
+    {
+      "type": "hysteria2",
+      "tag": "hysteria2-in",
+      "listen": "0.0.0.0",
+      "listen_port": 443,
+      "users": [
+        {
+          "name": "secondary",
+          "password": "YOUR_PASSWORD"
+        }
+      ],
+      "tls": {
+        "enabled": true,
+        "certificate_path": "/cloud/service/vpnProxy/server/tls/hysteria2.crt",
+        "key_path": "/cloud/service/vpnProxy/server/tls/hysteria2.key"
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "direct",
+      "tag": "direct"
+    },
+    {
+      "type": "block",
+      "tag": "block"
+    }
+  ],
+  "route": {
+    "final": "direct"
+  }
+}

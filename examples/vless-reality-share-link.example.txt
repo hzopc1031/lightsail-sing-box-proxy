@@ -1,0 +1,1 @@
+vless://YOUR_UUID@YOUR_SERVER_IP:443?encryption=none&flow=xtls-rprx-vision&security=reality&sni=YOUR_SNI&fp=chrome&pbk=YOUR_REALITY_PUBLIC_KEY&sid=YOUR_SHORT_ID&type=tcp#sing-box-vless-reality
