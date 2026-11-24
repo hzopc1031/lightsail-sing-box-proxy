@@ -1,0 +1,14 @@
+# 运行时密钥与生成物，不要提交
+state/
+server/
+backups/
+logs/
+clients/
+*.key
+*.crt
+*.env
+!examples/
+!config.example.json
+!examples/server.env.example
+sing-box.deb
+*.bak
